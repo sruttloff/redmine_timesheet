@@ -1,5 +1,1 @@
-group :test do
-  gem 'webrat'
-end
-
-gem 'riif'
+# No additional gems are required. CSV and IIF use Redmine's CSV dependency.

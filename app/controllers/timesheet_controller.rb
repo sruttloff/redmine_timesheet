@@ -1,197 +1,94 @@
 class TimesheetController < ApplicationController
   layout 'base'
-
-  if Rails::VERSION::MAJOR >= 4
-    before_action :get_list_size
-    before_action :get_precision
-    before_action :get_activities
-  else
-    before_filter :get_list_size
-    before_filter :get_precision
-    before_filter :get_activities
-  end
-
-  helper :sort
-  include SortHelper
-  helper :issues
-  include ApplicationHelper
-  helper :timelog
-  SessionKey = 'timesheet_filter'
+  before_action :prepare_timesheet
+  helper :issues, :timelog, :context_menus
+  SessionKey = 'timesheet_filter'.freeze
 
   def index
-    return unless User.current.allowed_to? :view_time_entries, nil, :global => true
-    load_filters_from_session
-    unless @timesheet
-      @timesheet ||= Timesheet.new
-    end
-    @timesheet.allowed_projects = allowed_projects
-    if @timesheet.allowed_projects.empty?
-      render :action => 'no_projects'
-    end
+    @timesheet = Timesheet.new(session[SessionKey] || {})
+    assign_projects
+    render :no_projects if @timesheet.allowed_projects.empty?
+  rescue Timesheet::InvalidFilter => e
+    session.delete(SessionKey)
+    @timesheet = Timesheet.new
+    assign_projects
+    flash.now[:error] = e.message
   end
 
   def report
-    return unless User.current.allowed_to? :view_time_entries, nil, :global => true
-    if params && params[:timesheet]
-      @timesheet = Timesheet.new(params[:timesheet])
-    else
-      redirect_to :action => 'index'
-      return
-    end
+    return redirect_to(action: 'index') unless params[:timesheet]
 
-    @timesheet.allowed_projects = allowed_projects
+    @timesheet = Timesheet.new(filter_params.to_h)
+    assign_projects
+    return render(:no_projects) if @timesheet.allowed_projects.empty?
 
-    if @timesheet.allowed_projects.empty?
-      render :action => 'no_projects'
-    end
-
-    if !params[:timesheet][:projects].blank?
-      @timesheet.projects = @timesheet.allowed_projects.find_all { |project|
-        params[:timesheet][:projects].include?(project.id.to_s)
-      }
-    else
-      @timesheet.projects = @timesheet.allowed_projects
-    end
-
-    call_hook(:plugin_timesheet_controller_report_pre_fetch_time_entries, { :timesheet => @timesheet, :params => params })
-    save_filters_to_session(@timesheet)
+    call_hook(:plugin_timesheet_controller_report_pre_fetch_time_entries, timesheet: @timesheet, params: params)
     @timesheet.fetch_time_entries
-
-    # collect spent time per project
-    @total = {}
-    unless @timesheet.sort == :issue
-      @timesheet.time_entries.each do |project, logs|
-        @total[project] = []
-        if logs[:logs]
-          logs[:logs].each do |log|
-            @total[project].push log.hours
-          end
-        end
-      end
-    else
-      @timesheet.time_entries.each do |project, project_data|
-        @total[project] = []
-        if project_data[:issues]
-          project_data[:issues].each do |issue, issue_data|
-            @total[project].push issue_data.collect(&:hours).sum
-          end
-        end
-      end
+    save_filters
+    @total = @timesheet.time_entries.transform_values do |entry|
+      (entry[:logs] || entry[:issues].values.flatten).sum(&:hours)
     end
-
-    # sum hours per project
-    @total.each do |project, hours|
-      sum = hours.sum
-      @total[project] = (sum.round - sum).abs < 0.05 ? sum.round : sum
-    end
-
-    @grand_total = @total.collect{|k,v| v}.sum
-
+    # Groups may overlap; count each entry once in the grand total.
+    @grand_total = @timesheet.entries.sum(&:hours)
     respond_to do |format|
-      format.html { render :action => 'details', :layout => false if request.xhr? }
-      format.csv  { send_data @timesheet.to_csv, :filename => 'timesheet.csv', :type => "text/csv" }
-      format.iif  {
-        render(
-          :iif => render_to_string(:locals => {
-            :total        => @total,
-            :grand_total  => @grand_total,
-            :timesheet    => @timesheet,
-            :date_from    => @timesheet.date_from.to_date,
-            :date_to      => @timesheet.date_to.to_date
-          }),
-          :filename => "timesheet-#{@timesheet.projects.collect{|p| p.id.to_s.rjust(3, '0')}.join('')}"
-        )
-      }
+      format.html { render :report, layout: !request.xhr? }
+      format.csv { send_data @timesheet.to_csv, filename: 'timesheet.csv', type: 'text/csv; charset=utf-8' }
+      format.iif { send_data @timesheet.to_iif, filename: 'timesheet.iif', type: 'application/octet-stream' }
     end
+  rescue Timesheet::InvalidFilter => e
+    render plain: e.message, status: :unprocessable_entity
   end
 
   def context_menu
-    @time_entries = TimeEntry.where(['id IN (?)', params[:ids]])
-    render :layout => false
+    @time_entries = Timesheet.visible_entries.where(id: params[:ids]).to_a
+    return render_404 if @time_entries.empty? || @time_entries.size != Array(params[:ids]).uniq.size
+
+    @time_entry = @time_entries.first if @time_entries.one?
+    @can = {edit: @time_entries.all? { |entry| entry.editable_by?(User.current) }}
+    @can[:delete] = @can[:edit]
+    @activities = @time_entries.map { |entry| entry.project.activities }.reduce(:&)
+    @options_by_custom_field = {}
+    @back = back_url
+    render :context_menu, layout: false
   end
 
   def reset
-    clear_filters_from_session
-    redirect_to :action => 'index'
+    session.delete(SessionKey)
+    redirect_to action: 'index'
   end
 
   private
 
-  def get_list_size
-    @list_size = Setting.plugin_redmine_timesheet['list_size'].to_i
+  def prepare_timesheet
+    @allowed_projects = Timesheet.allowed_projects
+    return deny_access unless User.current.admin? || @allowed_projects.any?
+
+    settings = Setting.plugin_redmine_timesheet
+    @list_size = settings['list_size'].to_i.clamp(2, 30)
+    @precision = settings['precision'].to_i.clamp(0, 10)
+    @activities = TimeEntryActivity.where(parent_id: nil).sorted
   end
 
-  def get_precision
-    precision = Setting.plugin_redmine_timesheet['precision']
+  def filter_params
+    params.require(:timesheet).permit(:date_from, :date_to, :period, :period_type, :sort,
+                                     projects: [], activities: [], users: [], groups: [])
+  end
 
-    if precision.blank?
-      # Set precision to a high number
-      @precision = 10
+  def assign_projects
+    @timesheet.allowed_projects = @allowed_projects
+    selected = @timesheet.selected_project_ids
+    @timesheet.projects = selected.nil? ? @allowed_projects : @allowed_projects.select { |project| selected.include?(project.id) }
+  end
+
+  def save_filters
+    filters = @timesheet.to_param.transform_values do |value|
+      value.is_a?(Array) ? value.map(&:to_s) : value.to_s
+    end
+    # Leave room for Redmine's other session data and encrypted cookie overhead.
+    if filters.to_json.bytesize < 1500
+      session[SessionKey] = filters
     else
-      @precision = precision.to_i
+      session.delete(SessionKey)
     end
   end
-
-  def get_activities
-    @activities = TimeEntryActivity.where('parent_id IS NULL')
-  end
-
-  def allowed_projects
-    # allowed_to? works with the default project-role-permission relationship.
-    # if a user has no active role (for example if all projects are archived) then them has not the permission
-    if User.current.admin? or User.current.allowed_to?(:see_all_timesheets, nil, {:global => true})
-      Project.order('name ASC')
-    else
-      Project.where(Project.visible_condition(User.current)).order('name ASC')
-    end
-  end
-
-  def clear_filters_from_session
-    session[SessionKey] = nil
-  end
-
-  def load_filters_from_session
-    if session[SessionKey]
-      @timesheet = Timesheet.new(session[SessionKey])
-      @timesheet.period_type = Timesheet::ValidPeriodType[:default]
-    end
-
-    if session[SessionKey] && session[SessionKey]['projects']
-      @timesheet.projects = allowed_projects.find_all { |project|
-        session[SessionKey]['projects'].include?(project.id.to_s)
-      }
-    end
-  end
-
-  def deep_clean(object)
-    case object
-    when Hash
-      object.transform_values { |v| deep_clean(v) }
-    when Array
-      object.map { |v| deep_clean(v) }
-    when String, Integer, Float, NilClass, TrueClass, FalseClass, Symbol
-      object
-    else
-      object.to_s # Convert unsupported objects to strings
-    end
-  end
-
-  def save_filters_to_session(timesheet)
-    if params[:timesheet]
-      # Check that the params will fit in the session before saving
-      # prevents an ActionController::Session::CookieStore::CookieOverflow
-      cleaned_timesheet = deep_clean(params[:timesheet].permit!.to_h)
-      encoded = Base64.encode64(Marshal.dump(cleaned_timesheet))
-      if encoded.size < 2.kilobytes
-        session[SessionKey] = cleaned_timesheet
-      end
-    end
-
-    if timesheet
-      session[SessionKey] ||= {}
-      session[SessionKey]['date_from'] = timesheet.date_from
-      session[SessionKey]['date_to'] = timesheet.date_to
-    end
-  end
-
 end

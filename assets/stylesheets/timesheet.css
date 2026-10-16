@@ -1,68 +1,14 @@
-div#timesheet-form p { padding:0px 10px; float:left; clear:none;}
-.icon-timesheet { background-image: url(../images/csv.png); }
-
-#date-options { margin-left: 10px; }
-#date-options br {display:inline}
-/*#date-options input[type='radio'] { margin-left: -20px; }*/
-#timesheet-form .button-to div {display:inline; }
-
+#timesheet-form fieldset { display: flex; flex-wrap: wrap; gap: 12px; }
+#timesheet-form fieldset > div { padding: 4px; }
 #timesheet-form label { display: block; }
-
-#timesheet-form fieldset > div {
-	float: left;
-	padding: 5px 10px;
-}
-
-#timesheet-form fieldset > .group-by {
-	float: none;
-}
-
-#timesheet-form fieldset > div.timesheet-projects {
-	clear: both;
-}
-
-#timesheet-form .timesheet-projects select,
-#timesheet-form .timesheet-activities select,
-#timesheet-form .timesheet-users select,
-#timesheet-form .timesheet-groups select {
-	height: 300px;
-	min-width: 200px;
-	border: 1px solid #ddd;
-	border-top: 0;
-}
-
-label.select-all {
-	cursor: pointer;
-	background-color: #f5f5f5;
-}
-
-#timesheet-form input:not([type=submit]), #timesheet-form select {
-	border: 1px solid #aaa;
-	background-color: #fff;
-}
-
-#timesheet-form input:not([type=submit]) {
-	border-bottom: 1px solid #888;
-}
-
-#timesheet-form .form-actions {
-  width: 100%;
-}
-
-#timesheet-form .radiobutton-label label {
-	display: inline;
-}
-
-tr.total, tr.week-number, div.week-number {
-	display: none;
-}
-
-.timesheet-groups {
-	display: none;
-}
-
-#time_entries table td:nth-child(1),
-#time_entries table th:nth-child(1)
-{
-  display: none;
-}
+#timesheet-form .radiobutton-label label { display: inline; }
+#timesheet-form .group-by, #timesheet-form .form-actions { flex-basis: 100%; }
+#timesheet-form select[multiple] { min-width: 180px; max-width: 100%; }
+#timesheet-form label.select-all { cursor: pointer; background: #f5f5f5; padding: 4px; }
+#timesheet-custom-period label { display: inline; }
+#time_entries .hours { text-align: right; }
+#time_entries .week-number, #time_entries .total { display: none; }
+#time_entries [hidden] { display: none; }
+.timesheet-toggle { margin-right: 6px; }
+.timesheet-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
+.icon-timesheet { background-image: url(../images/csv.png); }

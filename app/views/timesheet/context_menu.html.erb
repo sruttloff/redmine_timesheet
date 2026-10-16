@@ -1,4 +1,3 @@
-<%# TODO: Typo on hook %>
-<% entries = call_hook(:plugin_timesheet_view_timesheets_context_menu, { :time_entries => @time_entries }) %>
-<% entries += call_hook(:plugin_timesheet_views_timesheets_context_menu, { :time_entries => @time_entries }) %>
-<%= content_tag(:ul, entries) unless entries.empty? %>
+<%= render template: 'context_menus/time_entries' %>
+<%= call_hook(:plugin_timesheet_view_timesheets_context_menu, time_entries: @time_entries) %>
+<%= call_hook(:plugin_timesheet_views_timesheets_context_menu, time_entries: @time_entries) %>

@@ -1,36 +1,12 @@
-<table class="list issues">
-  <thead>
-    <th width="2%">
-      <%= link_to image_tag('toggle_check.png'), "javascript:;", 
-        :onclick => 'toggleIssuesSelection(".toggle-all"); return false;',
-        :title => "#{l(:button_check_all)}/#{l(:button_uncheck_all)}", :class => 'toggle-all' %>
-    </th>
-    <th width="2%">&nbsp;</th>
-    <th width="8%"><%= l(:label_date) %></th>
-    <th width="10%"><%= l(:label_member) %></th>
-    <th width="45%"><%= l(:label_issue) %> / <%= l(:field_comments) %></th>
-    <th width="10%"><%= l(:field_hours) %>
-    <% Redmine::Hook.call_hook(:plugin_timesheet_views_timesheet_group_header, { }) %>
-    <th align="center"></td>
-  </thead>
-  <tbody>
-    <%= render :partial => "issue_time_entries", :collection => entry[:issues].to_a %>
-  </tbody>
-</table>
-<br />
-<script type="text/javascript">
-function toggleTimeEntries(id) {
-$('.issue-time-entry-' + id).each(function() { $(this).toggle();} )
-$('.toggle-' + id).each(function() { $(this).toggle();} )
-}
-
-/*
- * Checks all the Time Entries under issue_id
- */
-function toggleTimeEntriesSelection(issue_id) {
-    $$('.issue-time-entry-' + issue_id).each(function(ele) {
-        toggleIssuesSelection(ele);
-    });
-}
-
-</script>
+<% entry[:issues].each_with_index do |(issue, logs), issue_index| %>
+  <% toggle_id = "issue-#{group_index}-#{issue_index}" %>
+  <h4>
+    <%= toggle_issue_arrows(toggle_id) %>
+    <%= issue ? link_to_issue(issue) : l(:timesheet_without_visible_issue) %>
+    (<%= number_with_precision(logs.sum(&:hours), precision: @precision) %> <%= l(:field_hours) %>)
+  </h4>
+  <div data-timesheet-details="<%= toggle_id %>" hidden>
+    <%= render partial: 'timesheet_group', locals: {entry: {logs: logs}, name: issue, total: logs.sum(&:hours)} %>
+  </div>
+  <%= call_hook(:plugin_timesheet_views_timesheet_time_entry_sum, issue: issue, time_entries: logs, precision: @precision) %>
+<% end %>

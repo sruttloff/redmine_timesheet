@@ -1,21 +1,18 @@
-<table class="list issues">
-  <thead>
-    <th width="2%">
-      <%= link_to image_tag('toggle_check.png'), "javascript:;",
-        :onclick => 'toggleIssuesSelection(".toggle-all"); return false;',
-        :title => "#{l(:button_check_all)}/#{l(:button_uncheck_all)}", :class => 'toggle-all' %>
-    </th>
-    <th width="8%"><%= l(:label_date) %></th>
-    <th width="10%"><%= l(:label_member) %></th>
-    <th width="15%"><%= l(:label_activity) %></th>
-    <th width="15%"><%= l(:label_project) %></th>
-    <th width="15%"><%= l(:label_version) %></th>
-    <th width="10%"><%= l(:label_issue) %></th>
-    <th width="25%"><%= l(:field_comments) %></th>
-    <th width="10%"><%= l(:field_hours) %></th>
+<div class="autoscroll">
+<table class="list time-entries">
+  <thead><tr>
+    <th class="checkbox hide-when-print"><%= check_box_tag 'check_all', '', false, class: 'timesheet-check-all', id: nil, title: l(:button_check_all), 'aria-label' => l(:button_check_all) %></th>
+    <th><%= l(:label_date) %></th>
+    <th><%= l(:label_member) %></th>
+    <th><%= l(:label_activity) %></th>
+    <th><%= l(:label_project) %></th>
+    <th><%= l(:label_version) %></th>
+    <th><%= l(:label_issue) %></th>
+    <th><%= l(:field_comments) %></th>
+    <th><%= l(:field_hours) %></th>
     <%= call_hook(:plugin_timesheet_views_timesheet_group_header, {}) %>
-    <th></th>
-  </thead>
-  <%= render :partial => "time_entry", :collection => entry[:logs], :locals => { :time_entries => entry[:logs] } %>
+    <th class="buttons hide-when-print"></th>
+  </tr></thead>
+  <tbody><%= render partial: 'time_entry', collection: entry[:logs], locals: {time_entries: entry[:logs]} %></tbody>
 </table>
-<br />
+</div>

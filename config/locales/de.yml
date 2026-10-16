@@ -1,4 +1,5 @@
 de:
+  timesheet_all_time: Gesamter Zeitraum
   timesheet_label_week_number: KW
   timesheet_title: Stundenzettel
   timesheet_date_range_label: Zeitraum
@@ -17,3 +18,21 @@ de:
   text_active_users: "nur aktive"
   text_all_users: "alle"
   permission_see_all_timesheets: "Alle Zeiteinträge anzeigen"
+  timesheet_groups_label: Gruppen
+  timesheet_without_group: Ohne Gruppe
+  timesheet_without_visible_issue: Ohne sichtbares Ticket
+  timesheet_invalid_dates: Bitte einen gültigen Zeitraum im Format JJJJ-MM-TT angeben (Von ≤ Bis).
+  timesheet_list_size: Sichtbare Einträge in Auswahllisten
+  timesheet_precision: Nachkommastellen für Stunden
+  timesheet_project_status: Projektstatus
+  timesheet_active_projects: Nur aktive Projekte
+  timesheet_all_projects: Alle (aktiv, geschlossen und archiviert)
+  timesheet_user_status: Benutzerstatus
+  timesheet_active_users: Nur aktive Benutzer
+  timesheet_all_users: Alle Benutzer
+  timesheet_invoice_rate_field: Projektfeld für den IIF-Stundensatz
+  timesheet_invoice_rate_hint: Optionales numerisches Projektfeld. Für IIF muss jedes ausgewählte Projekt einen gültigen Stundensatz haben.
+  timesheet_invoice_rate_required: Für den QuickBooks-Export bitte in den Plugin-Einstellungen ein numerisches Projektfeld für den Stundensatz auswählen.
+  timesheet_invoice_rate_invalid: 'Kein gültiger, nicht negativer Stundensatz für Projekt %{project}.'
+  timesheet_invoice_rate_hidden: IIF-Export nicht möglich, da das Projektfeld für den Stundensatz für Sie nicht sichtbar ist.
+  project_module_timesheet: Stundenzettel

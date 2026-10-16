@@ -1,30 +1,23 @@
-function report_add_calendar_weeks() {
-	var groups = $("#time_entries section.group")
-	groups.map(function(index, a) {
-		var group = $(a)
-		var first = group.find("tr.week-number").first()
-		first_text = first.find("td:nth-child(9)").text()
-		first.remove()
-		first = $("<div>", {"class": "week-number"}).append(first_text)
-		group.find("h3").after(first)
-	})
-}
-
-$(function() {
-  $('#select_timesheet_period_type_1').focus(function() {
-    $('#timesheet_period_type_1').attr('checked','checked')
-  })
-
-  $('#select_timesheet_period_type_2').click(function() {
-    $('#timesheet_period_type_2').attr('checked','checked')
-  })
-
-	$("label.select-all").click(function () {
-		var select = $(this).siblings("select")
-		var options = select.children()
-		var selected = options.length != select.find(":selected").length
-		options.each(function (index, a) { a.selected = selected });
-	})
-
-	report_add_calendar_weeks()
-})
+$(function () {
+  $('#select_timesheet_period_type_1').on('focus change', function () {
+    $('#timesheet_period_type_1').prop('checked', true);
+  });
+  $('#timesheet-custom-period').on('click focusin change', function () {
+    $('#timesheet_period_type_0').prop('checked', true);
+  });
+  $('#timesheet-form label.select-all').on('click', function (event) {
+    event.preventDefault();
+    var select = $(this).siblings('select');
+    select.find('option').prop('selected', select.find(':selected').length !== select.find('option').length);
+  });
+  $('.timesheet-toggle').on('click', function (event) {
+    event.preventDefault();
+    var id = $(this).attr('data-timesheet-toggle');
+    var expanded = $(this).attr('aria-expanded') !== 'true';
+    $('[data-timesheet-details="' + id + '"]').prop('hidden', !expanded);
+    $(this).attr('aria-expanded', String(expanded));
+  });
+  $('.timesheet-check-all').on('change', function () {
+    $(this).closest('table').find('input[name="ids[]"]').prop('checked', this.checked).trigger('change');
+  });
+});

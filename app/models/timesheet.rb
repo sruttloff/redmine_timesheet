@@ -1,431 +1,243 @@
+require 'csv'
+require 'bigdecimal'
+
 class Timesheet
-  attr_accessor :date_from, :date_to, :projects, :activities, :users, :groups, :allowed_projects, :period, :period_type
+  class InvalidFilter < StandardError; end
 
-  # Time entries on the Timesheet in the form of:
-  #   project.name => {:logs => [time entries], :users => [users shown in logs] }
-  #   project.name => {:logs => [time entries], :users => [users shown in logs] }
-  # project.name could be the parent project name also
-  attr_accessor :time_entries
+  attr_accessor :date_from, :date_to, :projects, :activities, :users, :groups,
+                :allowed_projects, :period_type, :time_entries, :potential_time_entry_ids
+  attr_reader :sort, :period, :selected_project_ids, :entries
 
-  # Array of TimeEntry ids to fetch
-  attr_accessor :potential_time_entry_ids
-  attr_accessor :spent_on
+  ValidSortOptions = {user: :label_user, project: :label_project, issue: :label_issue,
+                      group: :label_group, date: :label_date}.freeze
+  ValidPeriodType = {free_period: 0, default: 1}.freeze
+  PERIODS = %w[today yesterday current_week last_week 7_days current_month last_month 30_days current_year all].freeze
 
-  # Sort time entries by this field
-  attr_accessor :sort
-  ValidSortOptions = {
-    :user => 'User',
-    :project => 'Project',
-    :issue => 'Issue',
-    :group => 'Group',
-    :date => 'Date'
-  }
-
-  ValidPeriodType = {
-    :free_period => 0,
-    :default => 1
-  }
-
-  def initialize(options = { })
-    self.projects = []
-    self.time_entries = options[:time_entries] || {}
-    self.potential_time_entry_ids = options[:potential_time_entry_ids] || []
-    self.allowed_projects = options[:allowed_projects] || []
-    self.groups = []
-
-    unless options[:activities].nil?
-      self.activities = options[:activities].collect do |activity_id|
-        # Include project-overridden activities
-        activity = TimeEntryActivity.find(activity_id)
-        project_activities = TimeEntryActivity.where(['parent_id in (?)', activity.id]) if activity.parent_id.nil?
-        project_activities ||= []
-        [activity.id.to_i] + project_activities.collect(&:id)
-      end.flatten.uniq.compact
-    else
-      self.activities =  TimeEntryActivity.all.collect { |a| a.id.to_i }
-    end
-
-    unless options[:users].nil?
-      self.users = options[:users].collect { |u| u.to_i }
-    else
-      self.users = Timesheet.viewable_users.collect {|user| user.id.to_i }
-    end
-
-    if User.current.allowed_to?(:see_all_timesheets, nil, {:global => true})
-      unless options[:groups].nil?
-        self.groups= options[:groups].collect { |g| g.to_i }
-        groups = Group.where(:id => self.groups)
-        groups.each do |group|
-          self.users += group.user_ids
-        end
-        self.users.uniq!
-      else
-        self.groups= Group.all
-      end
-    end
-
-    if !options[:sort].nil? && options[:sort].respond_to?(:to_sym) && ValidSortOptions.keys.include?(options[:sort].to_sym)
-      self.sort = options[:sort].to_sym
-    else
-      self.sort = :users
-    end
-
-    self.date_from = options[:date_from] || Date.today.to_s
-    self.date_to = options[:date_to] || Date.today.to_s
-    self.spent_on=options[:spent_on]
-
-    if options[:period_type] && ValidPeriodType.values.include?(options[:period_type].to_i)
-      self.period_type = options[:period_type].to_i
-    else
-      self.period_type = ValidPeriodType[:free_period]
-    end
-    self.period = options[:period] || nil
+  def initialize(options = {})
+    options = options.to_h.with_indifferent_access
+    @projects = []
+    @allowed_projects = options[:allowed_projects] || []
+    @selected_project_ids = ids(options[:projects]) if options.key?(:projects)
+    @time_entries = {}
+    @entries = []
+    @potential_time_entry_ids = ids(options[:potential_time_entry_ids])
+    @activities = if options.key?(:activities)
+                    selected = ids(options[:activities])
+                    TimeEntryActivity.where(id: selected).or(TimeEntryActivity.where(parent_id: selected)).pluck(:id)
+                  else
+                    TimeEntryActivity.pluck(:id)
+                  end
+    @users = options.key?(:users) ? ids(options[:users]) : self.class.viewable_users.map(&:id)
+    @groups = ids(options[:groups])
+    @sort = ValidSortOptions.key?(options[:sort].to_s.to_sym) ? options[:sort].to_sym : :project
+    @period_type = options[:period_type].to_s == '1' ? 1 : 0
+    @date_from = options[:date_from].presence || User.current.today.to_s
+    @date_to = options[:date_to].presence || User.current.today.to_s
+    self.period = options[:period].presence || 'today'
+    validate_dates
   end
 
-  # Gets all the time_entries for all the projects
-  def fetch_time_entries
-    self.time_entries = {}
-    case self.sort
-    when :project
-      fetch_time_entries_by_project
-    when :user
-      fetch_time_entries_by_user
-    when :issue
-      fetch_time_entries_by_issue
-    when :group
-      fetch_time_entries_by_group
-    when :date
-      fetch_time_entries_by_date
-    else
-      fetch_time_entries_by_project
+  def self.roles_for(user, project)
+    return user.roles_for_project(project) unless project.archived?
+
+    membership = Member.includes(:roles).find_by(project_id: project.id, user_id: user.id) if user.logged?
+    membership ? membership.roles.to_a : (project.is_public? ? project.override_roles(user.builtin_role) : [])
+  end
+
+  # The special permission grants access to other users only in its own project.
+  def self.permission?(permission, project, user = User.current)
+    required_module = permission == :see_all_timesheets ? 'timesheet' : 'time_tracking'
+    return false unless project.module_enabled?(required_module)
+    return false if project.archived? && Setting.plugin_redmine_timesheet['project_status'] != 'all'
+    return true if user.admin?
+
+    roles_for(user, project).any? { |role| role.allowed_to?(permission) }
+  end
+
+  def self.allowed_projects(user = User.current)
+    scope = Project.order(:name, :id)
+    scope = scope.active unless Setting.plugin_redmine_timesheet['project_status'] == 'all'
+    scope.includes(:enabled_modules).select do |project|
+      project.module_enabled?('time_tracking') &&
+        (permission?(:view_time_entries, project, user) || permission?(:see_all_timesheets, project, user))
     end
   end
 
-  def period=(period)
-    return if self.period_type == Timesheet::ValidPeriodType[:free_period]
-    # Stolen from the TimelogController
-    case period.to_s
-    when 'today'
-      self.date_from = self.date_to = Date.today
-    when 'yesterday'
-      self.date_from = self.date_to = Date.today - 1
-    when 'current_week' # Mon -> Sun
-      self.date_from = Date.today - (Date.today.cwday - 1)%7
-      self.date_to = self.date_from + 6
-    when 'last_week'
-      self.date_from = Date.today - 7 - (Date.today.cwday - 1)%7
-      self.date_to = self.date_from + 6
-    when '7_days'
-      self.date_from = Date.today - 7
-      self.date_to = Date.today
-    when 'current_month'
-      self.date_from = Date.civil(Date.today.year, Date.today.month, 1)
-      self.date_to = (self.date_from >> 1) - 1
-    when 'last_month'
-      self.date_from = Date.civil(Date.today.year, Date.today.month, 1) << 1
-      self.date_to = (self.date_from >> 1) - 1
-    when '30_days'
-      self.date_from = Date.today - 30
-      self.date_to = Date.today
-    when 'current_year'
-      self.date_from = Date.civil(Date.today.year, 1, 1)
-      self.date_to = Date.civil(Date.today.year, 12, 31)
-    when 'all'
-      self.date_from = self.date_to = nil
-    end
-    self
+  def self.see_others?(user = User.current)
+    user.admin? || allowed_projects(user).any? { |project| permission?(:see_all_timesheets, project, user) }
   end
 
-  def to_param
-    {
-      :projects => projects.collect(&:id),
-      :date_from => date_from,
-      :date_to => date_to,
-      :activities => activities,
-      :users => users,
-      :sort => sort
-    }
-  end
-
-  def to_csv
-    out = "";
-    CSV.generate(out, :encoding => 'utf-8', :force_quotes => true) do |csv|
-      csv << csv_header
-
-      # Write the CSV based on the group/sort
-      case sort
-      when :user, :project
-        time_entries.sort.each do |entryname, entry|
-          entry[:logs].each do |e|
-            csv << time_entry_to_csv(e)
-          end
-        end
-      when :issue
-        time_entries.sort.each do |project, entries|
-          entries[:issues].sort {|a,b| a[0].id <=> b[0].id}.each do |issue, time_entries|
-            time_entries.each do |e|
-              csv << time_entry_to_csv(e)
-            end
-          end
-        end
-      end
-    end
-    out
+  def self.visible_entries(user = User.current)
+    projects = allowed_projects(user)
+    all_ids = if user.admin?
+                projects.map(&:id)
+              else
+                projects.select { |project| permission?(:see_all_timesheets, project, user) }.map(&:id)
+              end
+    own_ids = projects.map(&:id) - all_ids
+    TimeEntry.where(project_id: all_ids).or(TimeEntry.where(project_id: own_ids, user_id: user.id))
   end
 
   def self.viewable_users
-    is_plugin_present = Setting.plugin_redmine_timesheet.present? and (Setting.plugin_redmine_timesheet['user_status'] == 'all')
-    if User.current.allowed_to?(:see_all_timesheets, nil, :global => true)
-      user_scope = is_plugin_present ? User.all : User.active
-    else
-      user_scope = [User.current]
-    end
-    user_scope.select {|user| user.allowed_to?(:log_time, nil, :global => true) }
+    return [User.current] unless see_others?
+
+    Setting.plugin_redmine_timesheet['user_status'] == 'all' ? User.sorted.to_a : User.active.sorted.to_a
   end
 
-  protected
+  def period=(value)
+    @period = PERIODS.include?(value.to_s) ? value.to_s : 'today'
+    return if period_type == ValidPeriodType[:free_period]
 
-  def csv_header
-    csv_data = [
-      '#',
-      l(:label_date),
-      l(:label_member),
-      l(:label_activity),
-      l(:label_project),
-      l(:label_version),
-      l(:label_issue),
-      "#{l(:label_issue)} #{l(:field_subject)}",
-      l(:field_comments),
-      l(:field_hours)
-    ]
-    Redmine::Hook.call_hook(:plugin_timesheet_model_timesheet_csv_header, { :timesheet => self, :csv_data => csv_data})
-    csv_data
+    today = User.current.today
+    @date_from, @date_to = case @period
+                         when 'today' then [today, today]
+                         when 'yesterday' then [today - 1, today - 1]
+                         when 'current_week' then [today.beginning_of_week, today.end_of_week]
+                         when 'last_week' then [(today - 7).beginning_of_week, (today - 7).end_of_week]
+                         when '7_days' then [today - 6, today]
+                         when 'current_month' then [today.beginning_of_month, today.end_of_month]
+                         when 'last_month' then [(today << 1).beginning_of_month, (today << 1).end_of_month]
+                         when '30_days' then [today - 29, today]
+                         when 'current_year' then [today.beginning_of_year, today.end_of_year]
+                         when 'all' then [nil, nil]
+                         end
   end
 
-  def time_entry_to_csv(time_entry)
-    csv_data = [
-      time_entry.id,
-      time_entry.spent_on,
-      time_entry.user.name,
-      time_entry.activity.name,
-      time_entry.project.name,
-      (time_entry.issue.fixed_version if time_entry.issue),
-      ("#{time_entry.issue.tracker.name} ##{time_entry.issue.id}" if time_entry.issue),
-      (time_entry.issue.subject if time_entry.issue),
-      time_entry.comments,
-      time_entry.hours
-    ]
-    Redmine::Hook.call_hook(:plugin_timesheet_model_timesheet_time_entry_to_csv, { :timesheet => self, :time_entry => time_entry, :csv_data => csv_data})
-    csv_data
-  end
-
-  # Array of users to find
-  # String of extra conditions to add onto the query (and)
-  def conditions(users, extra_conditions=nil)
-    if self.potential_time_entry_ids.empty?
-      if self.date_from.present? && self.date_to.present?
-        projects = self.projects.map{|e| e[:id]}
-        conditions = ["spent_on >= (:from) and spent_on <= (:to) and #{TimeEntry.table_name}.project_id in (:projects) and user_id in (:users) and activity_id in (:activities)",
-          {
-            :from => self.date_from,
-            :to => self.date_to,
-            :projects => projects,
-            :activities => self.activities,
-            :groups => self.groups,
-            :users => users
-          }]
-      else # All time
-        projects = self.projects.map{|e| e[:id]}
-        conditions = ["#{TimeEntry.table_name}.project_id in (:projects) and user_id in (:users) and activity_id in (:activities)",
-          {
-            :projects => projects,
-            :activities => self.activities,
-            :groups => self.groups,
-            :users => users
-          }]
+  def fetch_time_entries
+    scope = self.class.visible_entries.where(project_id: projects.map(&:id), user_id: users, activity_id: activities)
+    scope = scope.where(spent_on: date_from..date_to) if date_from && date_to
+    scope = scope.where(id: potential_time_entry_ids) if potential_time_entry_ids.any?
+    # Group and User share the users table (STI); avoid selecting the group side of a self-join.
+    scope = scope.where(user_id: Group.givable.where(id: groups).includes(:users).flat_map { |group| group.users.map(&:id) }) if groups.any?
+    # Preserve extension hooks without allowing them to remove the visibility scope.
+    conditions = ["#{TimeEntry.table_name}.project_id IN (:projects)",
+                  {from: date_from, to: date_to, projects: projects.map(&:id), users: users,
+                   activities: activities, groups: groups, potential_time_entries: potential_time_entry_ids}]
+    Redmine::Hook.call_hook(:plugin_timesheet_model_timesheet_conditions, timesheet: self, conditions: conditions)
+    includes = [:activity, :user, :project, {issue: [:tracker, :assigned_to, :priority, :fixed_version]}]
+    Redmine::Hook.call_hook(:plugin_timesheet_model_timesheet_includes, timesheet: self, includes: includes)
+    @entries = scope.where(conditions).includes(includes).order(:spent_on, :id).to_a
+    @time_entries = {}
+    case sort
+    when :issue
+      entries.group_by(&:project).each do |project, logs|
+        @time_entries[project] = {issues: logs.group_by { |entry| visible_issue(entry) }, users: logs.map(&:user).uniq}
       end
+    when :group
+      selected_groups = groups.any? ? Group.givable.where(id: groups) : Group.givable
+      assigned = []
+      selected_groups.sorted.includes(:users).each do |group|
+        member_ids = group.users.map(&:id)
+        logs = entries.select { |entry| member_ids.include?(entry.user_id) }
+        next if logs.empty?
+
+        assigned.concat(logs)
+        @time_entries[group.name] = {logs: logs, users: logs.map(&:user).uniq}
+      end
+      ungrouped = entries - assigned
+      @time_entries[I18n.t(:timesheet_without_group)] = {logs: ungrouped, users: ungrouped.map(&:user).uniq} if ungrouped.any?
     else
-      conditions = ["user_id in (:users) and #{TimeEntry.table_name}.id in (:potential_time_entries)",
-        {
-          :users => users,
-          :potential_time_entries => self.potential_time_entry_ids
-        }]
+      entries.group_by do |entry|
+        case sort
+        when :user then entry.user
+        when :date then entry.spent_on
+        else entry.project
+        end
+      end.each do |key, logs|
+        @time_entries[key] = {logs: logs, users: logs.map(&:user).uniq}
+      end
     end
-
-    if extra_conditions
-      conditions[0] = conditions.first + ' and ' + extra_conditions
-    end
-
-    Redmine::Hook.call_hook(:plugin_timesheet_model_timesheet_conditions, { :timesheet => self, :conditions => conditions})
-    conditions
+    time_entries
   end
 
-  def includes
-    includes = [:activity, :user, :project, {:issue => [:tracker, :assigned_to, :priority]}]
-    Redmine::Hook.call_hook(:plugin_timesheet_model_timesheet_includes, { :timesheet => self, :includes => includes})
-    includes
+  def visible_issue(entry)
+    issue = entry.issue
+    issue if issue && (User.current.admin? || issue.visible?)
+  end
+
+  def to_param
+    # Empty arrays are otherwise omitted from URLs, turning an empty selection into the default selection.
+    {projects: projects.empty? ? [''] : projects.map(&:id), date_from: date_from, date_to: date_to,
+     period_type: period_type, period: period, activities: activities.empty? ? [''] : activities,
+     users: users.empty? ? [''] : users, groups: groups, sort: sort}
+  end
+
+  def to_csv
+    header = ['#', I18n.t(:label_date), I18n.t(:label_member), I18n.t(:label_activity), I18n.t(:label_project),
+              I18n.t(:label_version), I18n.t(:label_issue), "#{I18n.t(:label_issue)} #{I18n.t(:field_subject)}",
+              I18n.t(:field_comments), I18n.t(:field_hours)]
+    Redmine::Hook.call_hook(:plugin_timesheet_model_timesheet_csv_header, timesheet: self, csv_data: header)
+    "\uFEFF" + CSV.generate(force_quotes: true, encoding: 'UTF-8') do |csv|
+      csv << header
+      entries.each do |entry|
+        issue = visible_issue(entry)
+        row = [entry.id, entry.spent_on, entry.user.name, entry.activity.name, entry.project.name,
+               issue&.fixed_version&.name, ("#{issue.tracker.name} ##{issue.id}" if issue), issue&.subject,
+               entry.comments, entry.hours.to_f]
+        Redmine::Hook.call_hook(:plugin_timesheet_model_timesheet_time_entry_to_csv, timesheet: self, time_entry: entry, csv_data: row)
+        csv << row
+      end
+    end
+  end
+
+  # QuickBooks desktop invoice interchange; project custom fields supply hourly rates.
+  def to_iif
+    field_id = Setting.plugin_redmine_timesheet['invoice_rate_field_id'].to_i
+    field = ProjectCustomField.find_by(id: field_id, field_format: ['float', 'int'])
+    raise InvalidFilter, I18n.t(:timesheet_invoice_rate_required) unless field
+
+    rates = entries.to_h do |entry|
+      raise InvalidFilter, I18n.t(:timesheet_invoice_rate_hidden) unless field.visible_by?(entry.project)
+
+      raw = entry.project.custom_field_value(field_id).to_s
+      begin
+        rate = BigDecimal(raw)
+        raise ArgumentError if rate.negative? || !rate.finite?
+      rescue ArgumentError
+        raise InvalidFilter, I18n.t(:timesheet_invoice_rate_invalid, project: entry.project.name)
+      end
+      [entry.id, rate]
+    end
+    CSV.generate(col_sep: "\t", row_sep: "\r\n", encoding: 'UTF-8') do |csv|
+      csv << ['!ACCNT', 'NAME', 'ACCNTTYPE']
+      csv << ['ACCNT', 'Accounts Receivable', 'AR']
+      csv << ['ACCNT', 'Service Income', 'INC']
+      csv << ['!TRNS', 'TRNSTYPE', 'DATE', 'ACCNT', 'NAME', 'AMOUNT', 'DOCNUM', 'MEMO']
+      csv << ['!SPL', 'TRNSTYPE', 'DATE', 'ACCNT', 'NAME', 'AMOUNT', 'QNTY', 'PRICE', 'MEMO']
+      csv << ['!ENDTRNS']
+      entries.group_by(&:project).each do |project, logs|
+        total = logs.sum { |entry| (rates.fetch(entry.id) * BigDecimal(entry.hours.to_f.to_s)).round(2) }
+        csv << ['TRNS', 'INVOICE', User.current.today.strftime('%m/%d/%Y'), 'Accounts Receivable', clean_iif(project.name),
+                total.to_s('F'), "TS-#{project.id}-#{User.current.today.strftime('%Y%m%d')}", 'Redmine timesheet']
+        logs.each do |entry|
+          rate = rates.fetch(entry.id)
+          issue = visible_issue(entry)
+          memo = "#{entry.user.name} #{entry.spent_on} #{issue ? "##{issue.id} #{issue.subject}" : ''} #{entry.comments}"
+          csv << ['SPL', 'INVOICE', entry.spent_on.strftime('%m/%d/%Y'), 'Service Income', clean_iif(project.name),
+                  (-(rate * BigDecimal(entry.hours.to_f.to_s)).round(2)).to_s('F'), -entry.hours.to_f, rate.to_s('F'), clean_iif(memo)]
+        end
+        csv << ['ENDTRNS']
+      end
+    end
   end
 
   private
 
-  def time_entries_for_all_users(project)
-    project.time_entries.includes(self.includes).
-      where(self.conditions(self.users)).
-      order('spent_on ASC')
+  def ids(value)
+    Array(value).reject(&:blank?).map(&:to_i).select(&:positive?).uniq
   end
 
-  def time_entries_for_all_users_in_group(group)
-    TimeEntry.includes(self.includes).
-      where(self.conditions(group.user_ids)).
-      order('spent_on ASC')
+  def validate_dates
+    return if period_type == 1 && period == 'all'
+
+    @date_from = Date.iso8601(date_from.to_s)
+    @date_to = Date.iso8601(date_to.to_s)
+    raise ArgumentError if date_from > date_to
+  rescue ArgumentError, TypeError
+    raise InvalidFilter, I18n.t(:timesheet_invalid_dates)
   end
 
-  def time_entries_for_current_user(project)
-    project.time_entries.
-      includes(self.includes + [:activity, :user, {:issue => [:tracker, :assigned_to, :priority]}]).
-      where(self.conditions(User.current.id)).
-      order('spent_on ASC')
-  end
-
-  def issue_time_entries_for_all_users(issue)
-    issue.time_entries.includes(self.includes + [:activity, :user]).
-      where(self.conditions(self.users)).
-      order('spent_on ASC')
-  end
-
-  def issue_time_entries_for_current_user(issue)
-    issue.time_entries.includes(self.includes + [:activity, :user]).
-      where(self.conditions(User.current.id)).
-      order('spent_on ASC')
-  end
-
-  def time_entries_for_user(user, options={})
-    extra_conditions = options.delete :conditions
-    TimeEntry.includes(self.includes).
-      where(self.conditions([user], extra_conditions)).
-      order('spent_on ASC')
-  end
-
-  def fetch_time_entries_by_project
-    puts self.projects
-    self.projects.each do |project|
-      logs = []
-      users = []
-      if current_user_allowed_to_see_all()
-        logs = time_entries_for_all_users(project)
-        users = logs.collect(&:user).uniq.sort
-      elsif User.current.allowed_to? :view_time_entries, project
-        logs = time_entries_for_current_user(project)
-        users = logs.collect(&:user).uniq.sort
-      end
-
-      # Append the parent project name
-      if project.parent.nil?
-        unless logs.empty?
-          self.time_entries[project.name] = { :logs => logs, :users => users }
-        end
-      else
-        unless logs.empty?
-          self.time_entries[project.parent.name + ' / ' + project.name] = { :logs => logs, :users => users }
-        end
-      end
-    end
-  end
-
-  def fetch_time_entries_by_group
-    groups = Group.where(:id => self.groups)
-    groups.each do |group|
-      logs = []
-      users = []
-      if User.current.admin?
-        logs = time_entries_for_all_users_in_group(group)
-        users = logs.collect(&:user).uniq.sort
-      elsif User.current.groups == [group]
-        #Users with the Role and correct permission can see all time entries
-        logs = time_entries_for_all_users_in_group(group)
-        users = logs.collect(&:user).uniq.sort
-      end
-      unless logs.empty?
-        self.time_entries[group.name] = { :logs => logs, :users => users }
-      end
-    end
-  end
-
-  def current_user_allowed_to_see_all
-    User.current.admin? or User.current.allowed_to?(:see_all_timesheets, nil, {:global => true})
-  end
-
-  def fetch_time_entries_by_user
-    self.users.each do |user_id|
-      logs = []
-      if User.current.id == user_id or current_user_allowed_to_see_all()
-        logs = time_entries_for_user user_id
-      end
-      unless logs.empty?
-        user = User.find_by_id(user_id)
-        self.time_entries[user.name] = { :logs => logs }  unless user.nil?
-      end
-    end
-  end
-
-  #   project => { :users => [users shown in logs],
-  #                :issues =>
-  #                  { issue => {:logs => [time entries],
-  #                    issue => {:logs => [time entries],
-  #                    issue => {:logs => [time entries]}
-  #
-  def fetch_time_entries_by_issue
-    self.projects.each do |project|
-      logs = []
-      users = []
-      project.issues.each do |issue|
-        if current_user_allowed_to_see_all()
-          # Administrators can see all time entries
-          logs << issue_time_entries_for_all_users(issue)
-        elsif User.current.allowed_to_on_single_potentially_archived_project?(:view_time_entries, project)
-          # Users with permission to see their time entries
-          logs << issue_time_entries_for_current_user(issue)
-        end
-      end
-
-      logs.flatten! if logs.respond_to?(:flatten!)
-      logs.uniq! if logs.respond_to?(:uniq!)
-
-      unless logs.empty?
-        users << logs.collect(&:user).uniq.sort
-        issues = logs.collect(&:issue).uniq
-        issue_logs = { }
-        issues.each do |issue|
-          issue_logs[issue] = logs.find_all {|time_log| time_log.issue == issue } # TimeEntry is for this issue
-        end
-
-        # TODO: TE without an issue
-
-        self.time_entries[project] = { :issues => issue_logs, :users => users}
-      end
-    end
-  end
-
-  def fetch_time_entries_by_date
-    logs = []
-    # extra_conditions = 'GROUP_BY spent_on'
-    logs=TimeEntry.includes(self.includes).where(self.conditions(self.users))
-
-    unless logs.empty?
-      logs.each do |log|
-        date=log.spent_on
-        logs_to_return=[]
-        logs.each do |log2return|
-          if log2return.spent_on==date
-            logs_to_return << log2return
-          end
-        end
-        self.time_entries[date] = { :logs => logs_to_return }
-      end
-    end
-  end
-
-  def l(*args)
-    I18n.t(*args)
+  def clean_iif(value)
+    value.to_s.gsub(/[\t\r\n"]/, ' ')
   end
 end

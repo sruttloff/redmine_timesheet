@@ -1,4 +1,5 @@
 en:
+  timesheet_all_time: All time
   timesheet_label_week_number: Week
   timesheet_title: Timesheet
   timesheet_date_range_label: Period
@@ -17,3 +18,21 @@ en:
   text_active_users: "Active only"
   text_all_users: "All"
   timesheet_groups_label: Groups
+  timesheet_without_group: Without group
+  timesheet_without_visible_issue: Without a visible issue
+  timesheet_invalid_dates: Please enter a valid date range in YYYY-MM-DD format (From ≤ To).
+  timesheet_list_size: Visible entries in selection lists
+  timesheet_precision: Decimal places for hours
+  timesheet_project_status: Project status
+  timesheet_active_projects: Active projects only
+  timesheet_all_projects: All (active, closed and archived)
+  timesheet_user_status: User status
+  timesheet_active_users: Active users only
+  timesheet_all_users: All users
+  timesheet_invoice_rate_field: Project field for the IIF hourly rate
+  timesheet_invoice_rate_hint: Optional numeric project field. IIF requires a valid hourly rate for every selected project.
+  timesheet_invoice_rate_required: Select a numeric project custom field for the hourly rate in the plugin settings before exporting to QuickBooks.
+  timesheet_invoice_rate_invalid: 'Missing or invalid non-negative hourly rate for project %{project}.'
+  timesheet_invoice_rate_hidden: You cannot export IIF because the hourly-rate project field is not visible to you.
+  project_module_timesheet: Timesheet
+  permission_see_all_timesheets: View other users' timesheets in this project
